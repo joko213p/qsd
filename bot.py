@@ -186,13 +186,32 @@ IG = IGEngine()
 
 
 # ── Cookies ───────────────────────────────────────────────────────────────────
+def _clean_b64(s: str) -> str:
+    """Nettoie une valeur base64 collée à la main (erreurs fréquentes)."""
+    s = s.strip()
+    # Erreur classique : on a collé "IG_COOKIES_B64=...." dans le champ valeur.
+    for pref in ("IG_COOKIES_B64=", "IG_COOKIES=", "IG_COOKIES_B64:", "base64:"):
+        if s.startswith(pref):
+            s = s[len(pref):].strip()
+    # Guillemets éventuels ajoutés par l'UI.
+    s = s.strip().strip('"').strip("'").strip()
+    # Retire tout caractère d'espacement interne (retours à la ligne, espaces).
+    s = re.sub(r"\s+", "", s)
+    # Corrige le padding manquant (= en fin).
+    missing = (-len(s)) % 4
+    if missing:
+        s += "=" * missing
+    return s
+
+
 def _materialize_cookie_file() -> Optional[str]:
     """Écrit le fichier cookies Netscape sur disque (pour yt-dlp et instaloader)."""
     global COOKIE_FILE
     data: Optional[bytes] = None
     if IG_COOKIES_B64:
+        cleaned = _clean_b64(IG_COOKIES_B64)
         try:
-            data = base64.b64decode(IG_COOKIES_B64)
+            data = base64.b64decode(cleaned, validate=False)
         except Exception as exc:
             logger.error("IG_COOKIES_B64 invalide (base64) : %s", exc)
     elif IG_COOKIES.strip():
@@ -206,6 +225,22 @@ def _materialize_cookie_file() -> Optional[str]:
     with open(path, "wb") as f:
         f.write(data)
     COOKIE_FILE = path
+
+    # Journalise un aperçu utile pour le diagnostic (sans révéler les valeurs).
+    try:
+        txt = data.decode("utf-8", errors="replace")
+        has_sid = "sessionid" in txt
+        logger.info(
+            "Fichier cookies écrit : %d octets, %d lignes, sessionid=%s.",
+            len(data), txt.count("\n") + 1, "oui" if has_sid else "NON",
+        )
+        if not has_sid:
+            logger.error(
+                "Le fichier cookies ne contient pas 'sessionid' → la valeur "
+                "IG_COOKIES_B64 est probablement tronquée ou mal copiée."
+            )
+    except Exception:
+        pass
     return path
 
 
@@ -345,11 +380,20 @@ def collect_profile(username: str, kinds: List[str], temp_dir: str) -> Tuple[str
     try:
         profile = instaloader.Profile.from_username(L.context, username)
     except ie.ProfileNotExistsException:
-        return username, [], [f"Profil @{username} introuvable."]
+        if not IG.authed:
+            return username, [], [
+                f"Profil @{username} introuvable — mais la session Instagram "
+                "n'est PAS connectée. C'est très probablement la vraie cause : "
+                "Instagram bloque l'accès anonyme. Vérifie les cookies (/diag)."
+            ]
+        return username, [], [
+            f"Profil @{username} introuvable. Si tu es sûr qu'il existe, ta "
+            "session/ton proxy est peut-être bloqué par Instagram (/diag)."
+        ]
     except ie.LoginRequiredException:
-        return username, [], ["Connexion requise (cookies invalides ou expirés)."]
+        return username, [], ["Connexion requise (cookies invalides ou expirés). Lance /diag."]
     except (ie.ConnectionException, ie.QueryReturnedBadRequestException) as exc:
-        return username, [], [f"Instagram a refusé la requête (limite de débit ?) : {exc}"]
+        return username, [], [f"Instagram a refusé la requête (proxy bloqué ou limite de débit ?) : {exc}"]
     except Exception as exc:
         return username, [], [f"Impossible de récupérer le profil : {exc}"]
 
@@ -620,13 +664,76 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• un <b>profil</b> : <code>https://instagram.com/natgeo</code> ou <code>@natgeo</code>\n"
         "• ou un <b>post/reel précis</b> : <code>https://instagram.com/reel/XXXX/</code>\n\n"
         f"🔐 {auth}\n🌐 {proxy}\n"
-        f"📦 Limite : {MAX_POSTS} publications max, fichiers ≤ 50 Mo.",
+        f"📦 Limite : {MAX_POSTS} publications max, fichiers ≤ 50 Mo.\n\n"
+        "🩺 Problème ? Tape /diag pour un diagnostic.",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, context)
+
+
+def _run_diag() -> List[str]:
+    """Diagnostic bloquant (réseau) — à lancer dans un thread."""
+    lines: List[str] = []
+
+    # Versions / dépendances
+    lines.append(f"instaloader : {getattr(instaloader, '__version__', '?')}")
+    try:
+        import yt_dlp
+        lines.append(f"yt-dlp : {getattr(yt_dlp.version, '__version__', 'présent')}")
+    except Exception:
+        lines.append("yt-dlp : ABSENT")
+
+    # Cookies
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        try:
+            txt = Path(COOKIE_FILE).read_text("utf-8", errors="replace")
+            sid = "sessionid" in txt
+            lines.append(f"Cookies : fichier OK ({os.path.getsize(COOKIE_FILE)} o), sessionid={'oui' if sid else 'NON'}")
+        except Exception as exc:
+            lines.append(f"Cookies : fichier illisible ({exc})")
+    else:
+        lines.append("Cookies : AUCUN (variable IG_COOKIES_B64 vide ou non lue)")
+
+    # Proxy
+    lines.append(f"Proxy : {'configuré' if PROXY_URL else 'AUCUN'}")
+
+    # Test de connexion réel
+    who = None
+    try:
+        who = IG.L.test_login()
+    except Exception as exc:
+        lines.append(f"test_login : erreur — {type(exc).__name__}: {exc}")
+    if who:
+        lines.append(f"Connexion Instagram : ✅ @{who}")
+    else:
+        lines.append("Connexion Instagram : ❌ non connecté (cookies expirés/invalides ou proxy bloqué)")
+
+    # Test d'accès à un profil public connu
+    try:
+        p = instaloader.Profile.from_username(IG.L.context, "instagram")
+        lines.append(f"Accès profil public test : ✅ @instagram ({p.mediacount} publications visibles)")
+    except Exception as exc:
+        lines.append(f"Accès profil public test : ❌ {type(exc).__name__}: {exc}")
+
+    return lines
+
+
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update):
+        await update.message.reply_text("⛔ Accès non autorisé.")
+        return
+    msg = await update.message.reply_text("🔎 Diagnostic en cours…")
+    try:
+        async with IG_LOCK:
+            lines = await asyncio.to_thread(_run_diag)
+    except Exception as exc:
+        await _edit(msg, f"❌ Diagnostic impossible : {esc(str(exc))}")
+        return
+    body = "🩺 <b>Diagnostic</b>\n\n" + "\n".join(f"• {esc(l)}" for l in lines)
+    await _edit(msg, body)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -796,6 +903,7 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CallbackQueryHandler(on_choice, pattern=r"^t_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
