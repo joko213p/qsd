@@ -4,12 +4,6 @@ Bot Telegram qui télécharge **posts, reels, stories et "à la une"** d'un prof
 Instagram (ou un post/reel précis) et te les renvoie. Pensé pour **Railway** +
 proxy **Webshare.io**.
 
-> ⚠️ **À utiliser de façon responsable** : sur ton propre compte, ou sur du
-> contenu public que tu as le droit d'archiver. Télécharger le contenu d'autrui
-> sans consentement peut être illégal selon ton pays et enfreint les CGU
-> d'Instagram. Instagram **bannit régulièrement les comptes et IP** qui aspirent
-> du contenu — le proxy réduit ce risque technique mais ne te couvre pas
-> juridiquement.
 
 ---
 
