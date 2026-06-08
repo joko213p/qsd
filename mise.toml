@@ -1,0 +1,12 @@
+# Configuration mise pour Railway (Railpack).
+#
+# Désactive la vérification des "attestations GitHub" lors de l'installation
+# de Python. Nécessaire car le binaire précompilé de Python 3.12.7
+# (python-build-standalone, oct. 2024) n'a pas d'attestation que mise
+# puisse vérifier, ce qui faisait échouer le build avec :
+#   "No GitHub artifact attestations found for python@3.12.7"
+#
+# La version de Python reste pinée par runtime.txt (python-3.12.7).
+
+[settings]
+python.github_attestations = false
